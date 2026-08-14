@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://video-viewer.us/sitemap.xml
