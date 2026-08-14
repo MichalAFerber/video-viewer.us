@@ -1,0 +1,18 @@
+{
+  "name": "Video Viewer",
+  "short_name": "Video Viewer",
+  "description": "A fast, single-file video viewer. Drop a .webm/.mp4/.m4v/.ogv/.mov/.mkv to play it — all in your browser, nothing uploaded.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
