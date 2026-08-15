@@ -81,6 +81,8 @@
   .iconbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
   .iconbtn svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
   .iconbtn.iconbtn-gh svg{width:22px;height:22px;fill:currentColor;stroke:none}
+  .iconbtn.active{color:var(--accent);background:var(--overlay)}   /* §6.3 toggled state */
+  .iconbtn-speed{width:auto;min-width:40px;padding:0 .5rem;font-size:.78rem;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:.01em}
 
   /* ---------- Fast custom tooltips (native title is ~0.5s; this shows in ~0.06s) ----------
      Anchored to the trigger's RIGHT edge so tips on the right-aligned header/footer
@@ -283,6 +285,16 @@
   <img id="brandIcon" class="brand-icon" alt="" aria-hidden="true">
   <span class="doc-title" id="docTitle">Video Viewer</span>
   <nav class="actions" aria-label="Actions">
+    <button id="btnSubs" class="iconbtn" type="button" data-tip="Subtitles (C)" aria-label="Toggle subtitles" aria-pressed="false" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="6" y1="11" x2="11" y2="11"></line><line x1="14" y1="11" x2="18" y2="11"></line><line x1="6" y1="15" x2="9" y2="15"></line><line x1="12" y1="15" x2="18" y2="15"></line></svg>
+    </button>
+    <button id="btnLoop" class="iconbtn" type="button" data-tip="Loop (L)" aria-label="Toggle loop" aria-pressed="false" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+    </button>
+    <button id="btnSpeed" class="iconbtn iconbtn-speed" type="button" data-tip="Playback speed" aria-label="Playback speed: 1×" hidden>1×</button>
+    <button id="btnPip" class="iconbtn" type="button" data-tip="Picture-in-Picture" aria-label="Toggle Picture-in-Picture" aria-pressed="false" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"></rect><rect x="12" y="12" width="8" height="6" rx="1"></rect></svg>
+    </button>
     <button id="btnFrame" class="iconbtn" type="button" data-tip="Save frame as PNG" aria-label="Save the current frame as a PNG" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
     </button>
@@ -320,7 +332,7 @@
     </div>
     <div class="stage-meta">
       <p id="metaLine" aria-live="polite"></p>
-      <p class="keys" aria-hidden="true"><kbd>Space</kbd> play/pause &nbsp;·&nbsp; <kbd>←</kbd><kbd>→</kbd> ±5 s &nbsp;·&nbsp; <kbd>↑</kbd><kbd>↓</kbd> volume &nbsp;·&nbsp; <kbd>M</kbd> mute &nbsp;·&nbsp; <kbd>F</kbd> fullscreen</p>
+      <p class="keys" aria-hidden="true"><kbd>Space</kbd> play/pause &nbsp;·&nbsp; <kbd>←</kbd><kbd>→</kbd> ±5 s &nbsp;·&nbsp; <kbd>,</kbd><kbd>.</kbd> frame step (pauses first) &nbsp;·&nbsp; <kbd>↑</kbd><kbd>↓</kbd> volume &nbsp;·&nbsp; <kbd>M</kbd> mute &nbsp;·&nbsp; <kbd>L</kbd> loop &nbsp;·&nbsp; <kbd>C</kbd> subtitles &nbsp;·&nbsp; <kbd>F</kbd> fullscreen</p>
     </div>
   </section>
 
@@ -407,6 +419,10 @@
   var bgPicker   = doc.getElementById("bgPicker");
   var themeColor = doc.getElementById("themeColor");
   var btnFrame   = doc.getElementById("btnFrame");
+  var btnLoop    = doc.getElementById("btnLoop");
+  var btnSpeed   = doc.getElementById("btnSpeed");
+  var btnPip     = doc.getElementById("btnPip");
+  var btnSubs    = doc.getElementById("btnSubs");
   var toastTimer = null;
   var BASE_TITLE = "Video Viewer";
   var ACCEPT_EXT = { webm:1, mp4:1, m4v:1, ogv:1, mov:1, mkv:1 };   // this viewer's types ONLY (§8)
@@ -432,6 +448,14 @@
   function readFile(file){
     if (!file) return;
     var ext = extOf(file.name);
+    // §6.7 drop-to-replace, scoped exception: while a video is open, a .vtt/.srt
+    // sidecar ATTACHES as subtitles instead of replacing the video. With no video
+    // open the pair keeps the normal rejection path below (neither joins
+    // ACCEPT_EXT or the family map — sidecars are contextual only).
+    if ((ext === "vtt" || ext === "srt") && !stage.hidden && currentUrl){
+      attachSubtitles(file);
+      return;
+    }
     if (NOTICE_EXT[ext]){ showLegacyNotice(file, ext); return; }
     if (!ACCEPT_EXT[ext]){
       // §6.10: offer the owning sibling viewer first; unmapped types keep the toast
@@ -449,6 +473,7 @@
 
   function openVideo(file){
     revokeCurrentUrl();                       // drop-to-replace: free the previous object URL
+    removeSubtitles();                        // …and the sidecar blob URL + track with it
     currentFile = file;
     currentName = file.name || "video";
     metaLine.textContent = "";
@@ -456,6 +481,10 @@
     player.src = currentUrl;
     empty.hidden = true; notice.hidden = true; stage.hidden = false;
     btnFrame.hidden = false;
+    btnLoop.hidden = false; btnSpeed.hidden = false;
+    speedIdx = 1; applySpeed();               // rate resets to 1× per new file (never persisted)
+    syncPip();
+    setupMediaSession(currentName);
     docTitle.textContent = currentName;
     doc.title = currentName + " — " + BASE_TITLE;
     body.classList.add("viewing");
@@ -478,7 +507,9 @@
     if (!currentUrl) return;                  // ignore the no-src error after Clear
     var name = currentName;
     revokeCurrentUrl();
+    removeSubtitles();
     stage.hidden = true; btnFrame.hidden = true;
+    btnLoop.hidden = true; btnSpeed.hidden = true; btnPip.hidden = true;
     clearTimeout(headerTimer); headerTimer = null;
     body.classList.remove("viewing", "peek");
     // ⁨…⁩ (FSI…PDI) bidi-isolate the untrusted name (same rule as the route card)
@@ -535,16 +566,158 @@
     }, "image/png");
   });
 
+  /* ---------- v2: frame-step while paused (,/. — pairs with grab-frame) ---------- */
+  var FRAME_S = 1 / 30;
+  function frameStep(dir){
+    if (!player.paused) player.pause();       // stepping implies paused (documented in the hint)
+    var t = player.currentTime + dir * FRAME_S;
+    if (t < 0) t = 0;
+    if (isFinite(player.duration) && t > player.duration) t = player.duration;
+    player.currentTime = t;                   // native controls are the time display — they track this
+  }
+
+  /* ---------- v2: loop toggle (header iconbtn + L key) ---------- */
+  function setLoop(on){
+    player.loop = on;
+    btnLoop.classList.toggle("active", on);
+    btnLoop.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  btnLoop.addEventListener("click", function(){ setLoop(!player.loop); });
+
+  /* ---------- v2: playback speed (cycles 0.75 → 1 → 1.25 → 1.5 → 2) ---------- */
+  var SPEEDS = [0.75, 1, 1.25, 1.5, 2];
+  var speedIdx = 1;
+  function applySpeed(){
+    var face = SPEEDS[speedIdx] + "×";
+    player.playbackRate = SPEEDS[speedIdx];
+    btnSpeed.textContent = face;
+    btnSpeed.setAttribute("aria-label", "Playback speed: " + face);
+  }
+  btnSpeed.addEventListener("click", function(){
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    applySpeed();
+  });
+
+  /* ---------- v2: Picture-in-Picture (hidden when the API isn't there) ---------- */
+  var PIP_OK = !!doc.pictureInPictureEnabled;
+  function syncPip(){
+    btnPip.hidden = !PIP_OK || player.disablePictureInPicture === true || stage.hidden;
+  }
+  btnPip.addEventListener("click", function(){
+    if (doc.pictureInPictureElement){
+      try { doc.exitPictureInPicture(); } catch (e) {}
+      return;
+    }
+    var p;
+    try { p = player.requestPictureInPicture(); }
+    catch (e){ toast("Picture-in-Picture isn’t available for this video"); return; }
+    if (p && p.catch) p.catch(function(){ toast("Picture-in-Picture isn’t available for this video"); });
+  });
+  player.addEventListener("enterpictureinpicture", function(){
+    btnPip.classList.add("active"); btnPip.setAttribute("aria-pressed", "true");
+  });
+  player.addEventListener("leavepictureinpicture", function(){
+    btnPip.classList.remove("active"); btnPip.setAttribute("aria-pressed", "false");
+  });
+
+  /* ---------- v2: subtitle sidecars (.vtt/.srt attach while a video is open) ---------- */
+  var subUrl = null;   // sidecar blob URL — revoked alongside the media URL on replace and Clear
+  function setSubsUI(on){
+    btnSubs.classList.toggle("active", on);
+    btnSubs.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  function removeSubtitles(){
+    var old = player.querySelector("track");
+    if (old) player.removeChild(old);
+    if (subUrl){ try { URL.revokeObjectURL(subUrl); } catch (e) {} subUrl = null; }
+    btnSubs.hidden = true;
+    setSubsUI(false);
+  }
+  // Original tiny SRT → WebVTT converter: strip cue-index lines, comma → dot in
+  // timestamps, prepend the WEBVTT header. Handles \r\n and blank-line cue separation.
+  function srtToVtt(text){
+    var lines = String(text).replace(/^\uFEFF/, "").split(/\r?\n/);
+    var out = ["WEBVTT", ""];
+    for (var i = 0; i < lines.length; i++){
+      var line = lines[i];
+      if (/^\s*\d+\s*$/.test(line) && i + 1 < lines.length && lines[i + 1].indexOf("-->") !== -1) continue;
+      if (line.indexOf("-->") !== -1) line = line.replace(/(\d{1,2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
+      out.push(line);
+    }
+    return out.join("\n");
+  }
+  function attachSubtitles(file){
+    var ext = extOf(file.name);
+    var reader = new FileReader();
+    reader.onload = function(){
+      var vtt = ext === "srt" ? srtToVtt(reader.result) : String(reader.result);
+      removeSubtitles();                      // one track at a time; the old blob URL is revoked
+      subUrl = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));   // media-src blob: covers this
+      var track = doc.createElement("track");
+      track.kind = "subtitles";
+      track.label = file.name;
+      track.src = subUrl;
+      track.setAttribute("default", "");
+      player.appendChild(track);
+      if (player.textTracks && player.textTracks.length) player.textTracks[0].mode = "showing";
+      btnSubs.hidden = false;
+      setSubsUI(true);
+      toast("Subtitles attached — press c to toggle");
+    };
+    reader.onerror = function(){ toast("Couldn’t read the subtitle file"); };
+    reader.readAsText(file);
+  }
+  function toggleSubs(){
+    if (btnSubs.hidden || !player.textTracks || !player.textTracks.length) return;
+    var on = player.textTracks[0].mode !== "showing";
+    player.textTracks[0].mode = on ? "showing" : "hidden";
+    setSubsUI(on);
+  }
+  btnSubs.addEventListener("click", toggleSubs);
+
+  /* ---------- v2: Media Session (OS media keys + lock screens) ---------- */
+  function setupMediaSession(name){
+    if (!("mediaSession" in navigator)) return;
+    try { navigator.mediaSession.metadata = new MediaMetadata({ title: name }); } catch (e) {}
+    var handlers = {
+      play:         function(){ var p = player.play(); if (p && p.catch) p.catch(function(){}); },
+      pause:        function(){ player.pause(); },
+      seekbackward: function(d){ seekBy(-((d && d.seekOffset) || 5)); },
+      seekforward:  function(d){ seekBy((d && d.seekOffset) || 5); },
+      seekto:       function(d){ if (d && typeof d.seekTime === "number" && isFinite(d.seekTime)) player.currentTime = d.seekTime; }
+    };
+    for (var k in handlers){
+      try { navigator.mediaSession.setActionHandler(k, handlers[k]); } catch (e) {}
+    }
+  }
+
+  /* ---------- v2: volume/mute persistence (fv-vol / fv-muted; loop & speed are NOT persisted) ---------- */
+  try {
+    var savedVol = parseFloat(localStorage.getItem("fv-vol"));
+    if (isFinite(savedVol) && savedVol >= 0 && savedVol <= 1) player.volume = savedVol;
+    var savedMuted = localStorage.getItem("fv-muted");
+    if (savedMuted === "1") player.muted = true;
+    else if (savedMuted === "0") player.muted = false;
+  } catch (e) {}
+  player.addEventListener("volumechange", function(){
+    try {
+      localStorage.setItem("fv-vol", String(player.volume));
+      localStorage.setItem("fv-muted", player.muted ? "1" : "0");
+    } catch (e) {}
+  });
+
   /* ---------- Clearing ---------- */
   function clearAll(){
     currentFile = null; currentName = "";
     revokeCurrentUrl();
+    removeSubtitles();                        // Clear revokes the sidecar blob URL too
     try { player.pause(); } catch (e) {}
     player.removeAttribute("src");
     player.load();
     metaLine.textContent = "";
     stage.hidden = true; notice.hidden = true; empty.hidden = false;
     btnFrame.hidden = true;
+    btnLoop.hidden = true; btnSpeed.hidden = true; btnPip.hidden = true;
     docTitle.textContent = BASE_TITLE;
     doc.title = BASE_TITLE;
     clearTimeout(headerTimer); headerTimer = null;
@@ -757,6 +930,7 @@
       }
       return;                                           // nothing else acts beneath the dialog
     }
+    if (body.classList.contains("nav-open")) return;    // flyout nav owns the keyboard while open
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     if (!body.classList.contains("viewing") || stage.hidden) return;
     var t = e.target, tag = (t && t.tagName || "").toLowerCase();
@@ -774,6 +948,10 @@
     else if (k === "ArrowDown"){ e.preventDefault(); player.volume = Math.max(0, Math.round((player.volume - 0.1) * 10) / 10); }
     else if (k === "m" || k === "M"){ player.muted = !player.muted; }
     else if (k === "f" || k === "F"){ toggleFullscreen(); }
+    else if (k === "."){ e.preventDefault(); frameStep(1); }    // frame step pauses first if playing
+    else if (k === ","){ e.preventDefault(); frameStep(-1); }
+    else if (k === "l" || k === "L"){ setLoop(!player.loop); }
+    else if (k === "c" || k === "C"){ toggleSubs(); }
   });
   function seekBy(d){
     if (!isFinite(player.duration)) return;
