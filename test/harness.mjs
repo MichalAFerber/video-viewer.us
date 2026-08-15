@@ -52,6 +52,9 @@ const WEBM = join(ROOT, "test", "fixtures", "sample.webm");
 writeFileSync(join(FIX, "test.json"), '{"hello":"data"}');
 writeFileSync(join(FIX, "sample.xyz"), "not ours");
 writeFileSync(join(FIX, "fake.avi"), "RIFF....AVI LIST....not a real avi");
+// SRT sidecar: 2 cues, \r\n line endings — exercises the SRT → WebVTT converter
+writeFileSync(join(FIX, "subs.srt"),
+  "1\r\n00:00:00,000 --> 00:00:02,000\r\nHello subs\r\n\r\n2\r\n00:00:02,500 --> 00:00:04,000\r\nSecond cue\r\n");
 
 const browser = await chromium.launch(
   process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}
@@ -131,6 +134,92 @@ await page.evaluate(() => { document.getElementById("player").currentTime = 0; }
 await page.keyboard.press("ArrowRight");
 check("ArrowRight advances currentTime", await page.evaluate(() => document.getElementById("player").currentTime > 0));
 
+// -- v2: frame-step while paused ("," / "." nudge ∓/± 1/30 s, clamped)
+await page.evaluate(() => {
+  const v = document.getElementById("player");
+  v.pause(); v.currentTime = 1;
+  document.body.focus();
+});
+await page.keyboard.press(".");
+const ft1 = await page.evaluate(() => {
+  const v = document.getElementById("player");
+  return [v.currentTime, v.paused];
+});
+check('"." steps forward 1/30 s while paused', Math.abs(ft1[0] - (1 + 1 / 30)) < 0.01 && ft1[1], `t=${ft1[0]}`);
+await page.keyboard.press(",");
+const ft2 = await page.evaluate(() => document.getElementById("player").currentTime);
+check('"," steps back 1/30 s', Math.abs(ft2 - 1) < 0.01, `t=${ft2}`);
+await page.evaluate(() => { const v = document.getElementById("player"); const p = v.play(); if (p && p.catch) p.catch(() => {}); });
+await page.keyboard.press(".");
+check('"." while playing pauses first (documented in the hint)', await page.evaluate(() => document.getElementById("player").paused));
+
+// -- v2: loop toggle (L key + header iconbtn state, §6.3 conventions)
+await page.keyboard.press("l");
+check("L toggles loop on (aria-pressed + .active, button in .actions)", await page.evaluate(() => {
+  const v = document.getElementById("player"), b = document.getElementById("btnLoop");
+  return v.loop && !b.hidden && !!b.closest("nav.actions") &&
+    b.getAttribute("aria-pressed") === "true" && b.classList.contains("active");
+}));
+await page.keyboard.press("l");
+check("L toggles loop off", await page.evaluate(() => {
+  const v = document.getElementById("player"), b = document.getElementById("btnLoop");
+  return !v.loop && b.getAttribute("aria-pressed") === "false" && !b.classList.contains("active");
+}));
+
+// -- v2: playback speed cycles 0.75 → 1 → 1.25 → 1.5 → 2 → 0.75 (face + aria-label track)
+const wantSpeeds = [1.25, 1.5, 2, 0.75, 1];
+const speedSeq = [];
+for (let i = 0; i < wantSpeeds.length; i++) {
+  await page.click("#btnSpeed");
+  speedSeq.push(await page.evaluate(() => {
+    const v = document.getElementById("player"), b = document.getElementById("btnSpeed");
+    return [v.playbackRate, b.textContent, b.getAttribute("aria-label")];
+  }));
+}
+check("speed cycles with playbackRate + face + aria-label in sync",
+  speedSeq.every(([r, face, al], i) =>
+    r === wantSpeeds[i] && face === wantSpeeds[i] + "×" && al === "Playback speed: " + wantSpeeds[i] + "×"),
+  JSON.stringify(speedSeq));
+await page.click("#btnSpeed");   // leave at 1.25× to prove the per-file reset after replace
+
+// -- v2: PiP button visibility matches the API flag (never invoke PiP headless)
+const pipEnabled = await page.evaluate(() => !!document.pictureInPictureEnabled);
+const pipVisible = await page.evaluate(() => !document.getElementById("btnPip").hidden);
+check("PiP button visibility matches document.pictureInPictureEnabled", pipVisible === pipEnabled,
+  `enabled=${pipEnabled} visible=${pipVisible}`);
+
+// -- v2: Media Session metadata title = file name
+check("mediaSession metadata title equals the file name", await page.evaluate(() =>
+  !("mediaSession" in navigator) ||
+  (navigator.mediaSession.metadata && navigator.mediaSession.metadata.title === "sample.webm")
+));
+
+// -- v2: subtitle sidecar attaches while a video is open (SRT → WebVTT)
+await page.setInputFiles("#fileInput", join(FIX, "subs.srt"));
+await page.waitForFunction(() => {
+  const v = document.getElementById("player");
+  return v.querySelector("track") && v.textTracks.length === 1 &&
+    v.textTracks[0].cues && v.textTracks[0].cues.length === 2;
+}, null, { timeout: 10000 });
+check("srt sidecar attaches (single track, mode showing, toast)", await page.evaluate(() => {
+  const v = document.getElementById("player"), b = document.getElementById("btnSubs");
+  return v.textTracks[0].mode === "showing" && !b.hidden &&
+    b.getAttribute("aria-pressed") === "true" &&
+    document.getElementById("toast").textContent === "Subtitles attached — press c to toggle";
+}));
+check("srt → vtt conversion correct (2 cues, comma→dot, \\r\\n handled)", await page.evaluate(() => {
+  const cues = document.getElementById("player").textTracks[0].cues;
+  return cues[0].startTime === 0 && Math.abs(cues[0].endTime - 2) < 1e-6 && cues[0].text === "Hello subs" &&
+    Math.abs(cues[1].startTime - 2.5) < 1e-6 && Math.abs(cues[1].endTime - 4) < 1e-6 && cues[1].text === "Second cue";
+}));
+await page.evaluate(() => document.body.focus());
+await page.keyboard.press("c");
+check("c toggles subtitles to hidden", await page.evaluate(() =>
+  document.getElementById("player").textTracks[0].mode === "hidden" &&
+  document.getElementById("btnSubs").getAttribute("aria-pressed") === "false"
+));
+const subTrackUrl = await page.evaluate(() => document.querySelector("#player track").src);
+
 // grab-frame: click the camera button, catch the download, verify PNG magic + intrinsic dims
 const dlPromise = page.waitForEvent("download", { timeout: 10000 });
 await page.click("#btnFrame");
@@ -152,6 +241,14 @@ const url1 = await page.evaluate(() => document.getElementById("player").current
 await page.setInputFiles("#fileInput", WEBM);
 await page.waitForFunction((u) => window.__revoked.includes(u), url1, { timeout: 5000 });
 check("replace revokes the previous object URL", true);
+check("new video clears the sidecar: track gone, button hidden, blob URL revoked",
+  await page.evaluate((u) => window.__revoked.includes(u) &&
+    !document.querySelector("#player track") &&
+    document.getElementById("btnSubs").hidden, subTrackUrl));
+check("speed resets to 1× on a new file", await page.evaluate(() =>
+  document.getElementById("player").playbackRate === 1 &&
+  document.getElementById("btnSpeed").textContent === "1×"
+));
 const url2 = await page.evaluate(() => document.getElementById("player").currentSrc);
 await page.click("#btnClear");
 check("Clear revokes the object URL and resets the shell", await page.evaluate((u) =>
@@ -159,6 +256,17 @@ check("Clear revokes the object URL and resets the shell", await page.evaluate((
   !document.getElementById("empty").hidden &&
   document.getElementById("stage").hidden &&
   !document.body.classList.contains("viewing"), url2));
+
+// -- v2: a sidecar with NO video open keeps the normal rejection path
+// (.srt/.vtt are unmapped: family toast, no route card, no attach)
+await page.setInputFiles("#fileInput", join(FIX, "subs.srt"));
+await page.waitForFunction(() =>
+  document.getElementById("toast").classList.contains("show") &&
+  document.getElementById("toast").textContent.includes("isn’t a supported video file"),
+null, { timeout: 5000 });
+check(".srt with no video open gets the rejection toast, no attach", await page.evaluate(() =>
+  document.getElementById("routeCard").hidden && !document.querySelector("#player track")
+));
 
 // -- accept-with-notice: .avi shows the honest no-decoder card, never a silent drop
 await page.setInputFiles("#fileInput", join(FIX, "fake.avi"));
@@ -187,6 +295,39 @@ await page.setInputFiles("#fileInput", join(FIX, "test.json"));
 await page.waitForSelector("#routeCard:not([hidden])", { timeout: 5000 });
 await page.click("#routeDismiss");
 check("Not now dismisses the route card", await page.evaluate(() => document.getElementById("routeCard").hidden));
+
+// -- v2: shortcuts stay inert while the route card is open (§6.10 owns the keyboard)
+await page.setInputFiles("#fileInput", WEBM);
+await page.waitForFunction(() => {
+  const v = document.getElementById("player");
+  return v && v.readyState >= 1 && !document.getElementById("stage").hidden;
+}, null, { timeout: 15000 });
+await page.evaluate(() => {
+  const v = document.getElementById("player");
+  v.pause(); v.currentTime = 1; v.loop = false;
+  document.body.focus();
+});
+await page.setInputFiles("#fileInput", join(FIX, "test.json"));
+await page.waitForSelector("#routeCard:not([hidden])", { timeout: 5000 });
+await page.keyboard.press("l");
+await page.keyboard.press(".");
+check("shortcuts inert while the route card is open", await page.evaluate(() => {
+  const v = document.getElementById("player");
+  return !v.loop && Math.abs(v.currentTime - 1) < 1e-6 && !document.getElementById("routeCard").hidden;
+}));
+await page.keyboard.press("Escape");
+
+// -- v2: volume + mute persist across reload (fv-vol / fv-muted)
+await page.evaluate(() => { const v = document.getElementById("player"); v.volume = 0.3; v.muted = true; });
+await page.waitForFunction(() => {
+  try { return localStorage.getItem("fv-vol") === "0.3" && localStorage.getItem("fv-muted") === "1"; }
+  catch (e) { return false; }
+}, null, { timeout: 5000 });
+await page.reload({ waitUntil: "load" });
+check("volume + mute persist across reload", await page.evaluate(() => {
+  const v = document.getElementById("player");
+  return Math.abs(v.volume - 0.3) < 1e-6 && v.muted === true;
+}));
 
 // -- unmapped extension keeps the plain rejection toast
 await page.setInputFiles("#fileInput", join(FIX, "sample.xyz"));
