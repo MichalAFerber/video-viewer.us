@@ -250,12 +250,16 @@ check("speed resets to 1× on a new file", await page.evaluate(() =>
   document.getElementById("btnSpeed").textContent === "1×"
 ));
 const url2 = await page.evaluate(() => document.getElementById("player").currentSrc);
+check("load: URL reflects ?name=sample.webm", await page.evaluate(() =>
+  new URLSearchParams(location.search).get("name")) === "sample.webm");
 await page.click("#btnClear");
 check("Clear revokes the object URL and resets the shell", await page.evaluate((u) =>
   window.__revoked.includes(u) &&
   !document.getElementById("empty").hidden &&
   document.getElementById("stage").hidden &&
   !document.body.classList.contains("viewing"), url2));
+check("clear: ?name= removed from the URL", await page.evaluate(() =>
+  new URLSearchParams(location.search).get("name")) === null);
 
 // -- v2: a sidecar with NO video open keeps the normal rejection path
 // (.srt/.vtt are unmapped: family toast, no route card, no attach)
@@ -275,6 +279,11 @@ check(".avi shows the accept-with-notice card", await page.evaluate(() =>
   document.getElementById("noticeTitle").textContent.includes(".avi") &&
   document.getElementById("noticeNote").textContent === "Your file was not uploaded anywhere."
 ));
+// showLegacyNotice() calls clearAll() first, which wipes ?name=; it must then
+// re-assert the name it is about to put in the title, or the two disagree.
+check(".avi notice still names the file in ?name=", await page.evaluate(() =>
+  new URLSearchParams(location.search).get("name") === "fake.avi" &&
+  document.getElementById("docTitle").textContent === "fake.avi"));
 await page.click("#btnClear");
 
 // -- family router: a sibling's type gets the offer card, not the toast
@@ -337,6 +346,47 @@ check("unmapped type gets the rejection toast", await page.evaluate(() =>
   document.getElementById("routeCard").hidden
 ));
 await ctx.close();
+
+// -- direct visit with ?name=: empty-state names the last-viewed file
+const q3 = await browser.newContext().then((c) => c.newPage());
+hook(q3);
+await q3.goto(`http://localhost:${PORT}/?name=${encodeURIComponent("sample.webm")}`, { waitUntil: "load", timeout: 30000 });
+check("?name=: 'shared for' sub-line names the file", await q3.evaluate(() => {
+  const sub = document.querySelector(".empty-sub");
+  return /shared for/.test(sub.textContent) && /sample\.webm/.test(sub.textContent);
+}));
+await q3.context().close();
+
+// -- ?name= carrying markup renders as TEXT, never parsed as HTML
+const q4 = await browser.newContext().then((c) => c.newPage());
+hook(q4);
+const HOSTILE_NAME = "<img src=x onerror=alert(1)>.webm";
+await q4.goto(`http://localhost:${PORT}/?name=${encodeURIComponent(HOSTILE_NAME)}`, { waitUntil: "load", timeout: 30000 });
+check("?name=: hostile markup shows as literal text, never parsed", await q4.evaluate((name) => {
+  const sub = document.querySelector(".empty-sub");
+  return sub.textContent.includes(name)                 // present, verbatim
+    && sub.querySelector("img") === null                // no element was built
+    && sub.childNodes.length === 1                      // and the sub-line is
+    && sub.childNodes[0].nodeType === 3;                // exactly one text node
+}, HOSTILE_NAME));
+await q4.context().close();
+
+// -- ?name= with a quote payload: asserted for ENCODING FIDELITY, not for
+// attribute escaping. This sink is textContent and the name never lands in
+// attribute position, so a quote cannot open an attribute here no matter how
+// the value is handled — a test claiming otherwise passes unconditionally and
+// was removed rather than shipped (it passed against a raw innerHTML sink).
+// What this DOES catch is a naive escaper added upstream: any repo that starts
+// pre-escaping the name would show a literal &quot; here and fail.
+const QUOTE_NAME = 'a" b\' c & d.webm';
+const q5 = await browser.newContext().then((c) => c.newPage());
+hook(q5);
+await q5.goto(`http://localhost:${PORT}/?name=${encodeURIComponent(QUOTE_NAME)}`, { waitUntil: "load", timeout: 30000 });
+check("?name=: quotes and ampersands survive verbatim as text", await q5.evaluate((name) => {
+  const sub = document.querySelector(".empty-sub");
+  return sub.textContent.includes(name);
+}, QUOTE_NAME));
+await q5.context().close();
 
 // -- fresh context with dark system scheme: must default dark
 const ctx2 = await browser.newContext({ colorScheme: "dark" });
