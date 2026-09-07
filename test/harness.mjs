@@ -8,7 +8,7 @@
 // (name-based gates need no real bytes).
 import { chromium } from "playwright";
 import http from "node:http";
-import { readFileSync, writeFileSync, existsSync, statSync, mkdtempSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, mkdtempSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -404,13 +404,31 @@ check("#fvh=%zz boots clean and clears the hash", await p3.evaluate(() =>
 ));
 await ctx2.close();
 
+// -- Every file this site actually ships JavaScript in. Today that is
+// index.html alone; it becomes index.html + app.js the moment the inline
+// script is extracted. Two checks below scanned index.html directly, which
+// coupled them to that layout rather than to what they assert.
+const SHIPPED = ["index.html", ...readdirSync(ROOT).filter((f) => f.endsWith(".js"))]
+  .filter((f) => existsSync(join(ROOT, f)));
+const shippedSrc = SHIPPED.map((f) => readFileSync(join(ROOT, f), "utf8")).join("\n");
+const idx = readFileSync(join(ROOT, "index.html"), "utf8");   // markup checks stay on the document
+
 // -- FV-MAP governance: the block between the markers deep-equals the canonical map
-const idx = readFileSync(join(ROOT, "index.html"), "utf8");
-const mStart = idx.indexOf("/* FV-MAP-START");
-const mEnd = idx.indexOf("/* FV-MAP-END */");
+//
+// Located by CONTENT, not by filename. The §6.10 contract is "this block
+// matches family-map.json"; where it lives is not part of it. Reading
+// index.html only meant that moving the script to a .js file left mStart at
+// -1, a nonsense slice, and a failure reading as a map mismatch rather than
+// as a missing block.
+const FV_MARK = "/* FV-MAP-START";
+const fvFile = SHIPPED.find((f) => readFileSync(join(ROOT, f), "utf8").includes(FV_MARK));
+const fvText = fvFile ? readFileSync(join(ROOT, fvFile), "utf8") : "";
+check("FV-MAP block is present in exactly one shipped file", !!fvFile, fvFile || "no file contains " + FV_MARK);
+const mStart = fvText.indexOf(FV_MARK);
+const mEnd = fvText.indexOf("/* FV-MAP-END */");
 let mapOk = false, mapDetail = "";
 try {
-  const block = idx.slice(idx.indexOf("*/", mStart) + 2, mEnd);
+  const block = fvText.slice(fvText.indexOf("*/", mStart) + 2, mEnd);
   const got = new Function(block + "; return { FAMILY, FAMILY_HUB, FAMILY_NAMES, FAMILY_MAP };")();
   const want = JSON.parse(readFileSync(join(ROOT, "test", "family-map.json"), "utf8"));
   const deepEq = (a, b) => JSON.stringify(sort(a)) === JSON.stringify(sort(b));
@@ -434,7 +452,13 @@ const csp = H["Content-Security-Policy"];
 check("CSP: default-src 'none' + media-src 'self' blob:", /default-src 'none'/.test(csp) && /media-src 'self' blob:/.test(csp));
 check("CSP allows self fonts + manifest", /font-src[^;]*'self'/.test(csp) && /manifest-src 'self'/.test(csp));
 check("head links (manifest + favicon.ico)", idx.includes('rel="manifest"') && idx.includes("/favicon.ico"));
-check("no eval / new Function in the page", !/\beval\s*\(/.test(idx) && !/new Function/.test(idx));
+// Scans every shipped source, not just index.html. Against the document alone
+// this check would keep PASSING after the inline script is extracted -- it
+// would simply have nothing left to look at, which is the failure mode where a
+// green result means the instrument stopped rather than the hazard went away.
+check("no eval / new Function in any shipped source",
+  !/\beval\s*\(/.test(shippedSrc) && !/new Function/.test(shippedSrc),
+  `scanned: ${SHIPPED.join(", ")}`);
 
 // External-resource network noise (analytics offline) is allowed; CSP
 // violations are worded "Refused to ..." and still fail.
